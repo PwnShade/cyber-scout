@@ -52,6 +52,10 @@ export default {
 					DEFAULT: 'hsl(var(--card))',
 					foreground: 'hsl(var(--card-foreground))'
 				},
+				'cyber-green': 'hsl(var(--cyber-green))',
+				'cyber-blue': 'hsl(var(--cyber-blue))',
+				'cyber-purple': 'hsl(var(--cyber-purple))',
+				'terminal-green': 'hsl(var(--terminal-green))',
 				sidebar: {
 					DEFAULT: 'hsl(var(--sidebar-background))',
 					foreground: 'hsl(var(--sidebar-foreground))',
@@ -84,11 +88,30 @@ export default {
 					to: {
 						height: '0'
 					}
+				},
+				'pulse-glow': {
+					'0%, 100%': {
+						boxShadow: '0 0 5px hsl(var(--cyber-green) / 0.3)'
+					},
+					'50%': {
+						boxShadow: '0 0 20px hsl(var(--cyber-green) / 0.8), 0 0 30px hsl(var(--cyber-green) / 0.5)'
+					}
+				},
+				'scan': {
+					'0%': { transform: 'translateX(-100%)' },
+					'100%': { transform: 'translateX(100%)' }
+				},
+				'typing': {
+					'0%': { width: '0' },
+					'100%': { width: '100%' }
 				}
 			},
 			animation: {
 				'accordion-down': 'accordion-down 0.2s ease-out',
-				'accordion-up': 'accordion-up 0.2s ease-out'
+				'accordion-up': 'accordion-up 0.2s ease-out',
+				'pulse-glow': 'pulse-glow 2s ease-in-out infinite',
+				'scan': 'scan 2s linear infinite',
+				'typing': 'typing 2s steps(20) infinite'
 			}
 		}
 	},
