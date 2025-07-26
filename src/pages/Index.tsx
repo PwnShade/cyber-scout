@@ -1,7 +1,7 @@
-import { ReconDashboard } from "@/components/ReconDashboard";
+import { ReconvergeDashboard } from "@/components/ReconvergeDashboard";
 
 const Index = () => {
-  return <ReconDashboard />;
+  return <ReconvergeDashboard />;
 };
 
 export default Index;
