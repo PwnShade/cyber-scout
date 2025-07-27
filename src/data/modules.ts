@@ -175,6 +175,17 @@ export const reconModules: ReconModule[] = [
 
   // Parameter & JS Analysis
   {
+    id: "js-discovery",
+    name: "JS File Discovery",
+    description: "Discover JavaScript files from web pages",
+    icon: Code,
+    category: "Discovery",
+    requires: ["alive-urls"],
+    produces: ["js-urls"],
+    enabled: true,
+    executionTime: 20
+  },
+  {
     id: "arjun",
     name: "Arjun",
     description: "HTTP parameter discovery suite",
