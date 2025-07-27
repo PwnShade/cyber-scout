@@ -33,6 +33,10 @@ export class DependencyResolver {
         );
         
         if (producers.length === 0 && required !== 'domain') {
+          // For js-urls, suggest enabling a JS discovery module
+          if (required === 'js-urls') {
+            throw new Error(`No module produces required data type: ${required} for module: ${moduleId}. Enable 'JS File Discovery' module to resolve this dependency.`);
+          }
           throw new Error(`No module produces required data type: ${required} for module: ${moduleId}`);
         }
 
