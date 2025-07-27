@@ -184,6 +184,17 @@ export const ReconvergeDashboard = () => {
 
       // Generate mock results
       const mockData = generateModuleResults(module, scan.target, updatedScan.results);
+      
+      // Debug logging
+      console.log(`Module ${module.id} (${module.name}) generated results:`, mockData);
+      
+      // Ensure we have some data - if mock data is empty, add a default result
+      const finalData = mockData && Object.keys(mockData).length > 0 ? mockData : {
+        message: `${module.name} completed successfully`,
+        timestamp: new Date().toISOString(),
+        results: `Mock results for ${module.name}`,
+        status: 'success'
+      };
 
       // Update module status to completed
       if (resultIndex >= 0) {
@@ -191,7 +202,7 @@ export const ReconvergeDashboard = () => {
           ...updatedScan.results[resultIndex],
           status: 'completed',
           endTime: new Date(),
-          data: mockData
+          data: finalData
         };
         
         completedCount++;
