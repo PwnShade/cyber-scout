@@ -418,6 +418,111 @@ export const ReconvergeDashboard = () => {
       case "masscan":
         return MockDataGenerator.generatePorts();
 
+      case "corsy":
+        const urlsForCorsy = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
+        return {
+          corsFindings: urlsForCorsy.slice(0, 3).map(url => ({
+            url,
+            corsEnabled: true,
+            accessControlAllowOrigin: '*',
+            accessControlAllowCredentials: 'true',
+            vulnerable: true,
+            riskLevel: 'High',
+            details: 'Wildcard origin with credentials allowed'
+          })),
+          totalUrls: urlsForCorsy.length,
+          vulnerableEndpoints: 2
+        };
+
+      case "nuclei-cors":
+        const urlsForNucleiCors = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
+        return {
+          corsVulnerabilities: [
+            {
+              severity: 'High',
+              title: 'CORS Wildcard with Credentials',
+              url: urlsForNucleiCors[0] || `https://${target}`,
+              description: 'Server allows wildcard origin with credentials'
+            },
+            {
+              severity: 'Medium', 
+              title: 'CORS Reflected Origin',
+              url: urlsForNucleiCors[1] || `https://${target}/api`,
+              description: 'Server reflects arbitrary origins in CORS headers'
+            }
+          ],
+          totalUrls: urlsForNucleiCors.length,
+          foundIssues: 2
+        };
+
+      case "nuclei-open-redirect":
+        const urlsForRedirect = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
+        return {
+          redirectVulnerabilities: [
+            {
+              severity: 'Medium',
+              title: 'Open Redirect Vulnerability',
+              url: `${urlsForRedirect[0] || `https://${target}`}/redirect?url=`,
+              description: 'Application redirects to arbitrary URLs'
+            }
+          ],
+          totalUrls: urlsForRedirect.length,
+          foundIssues: 1
+        };
+
+      case "nuclei-host-header":
+        const urlsForHost = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
+        return {
+          hostHeaderVulnerabilities: [
+            {
+              severity: 'Medium',
+              title: 'Host Header Injection',
+              url: urlsForHost[0] || `https://${target}`,
+              description: 'Application accepts arbitrary host headers'
+            }
+          ],
+          totalUrls: urlsForHost.length,
+          foundIssues: 1
+        };
+
+      case "retire-js":
+        const urlsForRetire = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
+        return {
+          jsVulnerabilities: [
+            {
+              severity: 'High',
+              title: 'jQuery 1.8.3 - Known Vulnerabilities',
+              library: 'jquery',
+              version: '1.8.3',
+              url: `${urlsForRetire[0] || `https://${target}`}/js/jquery.min.js`,
+              cve: ['CVE-2020-11022', 'CVE-2020-11023']
+            },
+            {
+              severity: 'Medium',
+              title: 'Bootstrap 3.3.7 - XSS Vulnerability',
+              library: 'bootstrap',
+              version: '3.3.7',
+              url: `${urlsForRetire[0] || `https://${target}`}/css/bootstrap.min.css`,
+              cve: ['CVE-2019-8331']
+            }
+          ],
+          totalLibraries: 15,
+          vulnerableLibraries: 2
+        };
+
+      case "favicon-hash":
+        const urlsForFavicon = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
+        return {
+          faviconHashes: urlsForFavicon.slice(0, 3).map(url => ({
+            url,
+            hash: 'mmhash:' + Math.random().toString(36).substr(2, 9),
+            technology: Math.random() > 0.5 ? 'Apache' : 'Nginx',
+            confidence: Math.floor(Math.random() * 30) + 70
+          })),
+          totalUrls: urlsForFavicon.length,
+          identifiedTechnologies: 2
+        };
+
       default:
         return {
           message: `${module.name} completed successfully`,
