@@ -304,6 +304,109 @@ export const ReconvergeDashboard = () => {
           screenshots: MockDataGenerator.generateScreenshots(urlsForScreenshots)
         };
 
+      case "arjun":
+        const urlsForParams = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
+        return {
+          parameters: urlsForParams.slice(0, 3).flatMap(url => MockDataGenerator.generateParameters(url)),
+          totalUrls: urlsForParams.length,
+          foundParameters: 24
+        };
+
+      case "linkfinder":
+        const jsUrls = getPreviousData('js-urls')?.jsFiles || [`https://${target}/js/app.js`];
+        return {
+          endpoints: jsUrls.flatMap(jsUrl => MockDataGenerator.generateEndpoints(jsUrl)),
+          totalJsFiles: jsUrls.length,
+          foundEndpoints: 18
+        };
+
+      case "secretfinder":
+        const jsUrlsForSecrets = getPreviousData('js-urls')?.jsFiles || [`https://${target}/js/app.js`];
+        return {
+          secrets: jsUrlsForSecrets.flatMap(jsUrl => MockDataGenerator.generateSecrets(jsUrl)),
+          totalJsFiles: jsUrlsForSecrets.length,
+          foundSecrets: 3
+        };
+
+      case "js-file-discovery":
+        const aliveUrlsForJs = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
+        return {
+          jsFiles: aliveUrlsForJs.flatMap(url => [
+            `${url}/js/app.js`,
+            `${url}/assets/main.js`,
+            `${url}/static/bundle.js`
+          ]).slice(0, 12),
+          totalUrls: aliveUrlsForJs.length,
+          foundJsFiles: 12
+        };
+
+      case "gobuster-vhost":
+        return {
+          virtualHosts: [
+            `admin.${target}`,
+            `api.${target}`,
+            `staging.${target}`,
+            `dev.${target}`,
+            `test.${target}`
+          ],
+          totalAttempts: 4500,
+          foundVhosts: 5
+        };
+
+      case "cookie-flags":
+        const urlsForCookies = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
+        return {
+          cookieAnalysis: urlsForCookies.slice(0, 3).map(url => ({
+            url,
+            cookies: [
+              { name: 'sessionid', secure: true, httpOnly: true, sameSite: 'Strict' },
+              { name: 'csrf_token', secure: false, httpOnly: false, sameSite: 'Lax' },
+              { name: 'user_pref', secure: false, httpOnly: false, sameSite: 'None' }
+            ],
+            securityIssues: ['Missing Secure flag on csrf_token', 'Missing HttpOnly on user_pref']
+          })),
+          totalUrls: urlsForCookies.length
+        };
+
+      case "cors-analyzer":
+        const urlsForCors = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
+        return {
+          corsFindings: urlsForCors.slice(0, 3).map(url => ({
+            url,
+            accessControlAllowOrigin: '*',
+            accessControlAllowCredentials: 'true',
+            vulnerable: true,
+            riskLevel: 'High'
+          })),
+          totalUrls: urlsForCors.length,
+          vulnerableEndpoints: 2
+        };
+
+      case "nuclei-js":
+        const jsUrlsForVulns = getPreviousData('js-urls')?.jsFiles || [`https://${target}/js/app.js`];
+        return {
+          jsVulnerabilities: [
+            {
+              severity: 'Medium',
+              title: 'Exposed API Key in JavaScript',
+              file: jsUrlsForVulns[0] || `https://${target}/js/app.js`,
+              description: 'API key found hardcoded in JavaScript file'
+            },
+            {
+              severity: 'Low',
+              title: 'Debug Information Leak',
+              file: jsUrlsForVulns[1] || `https://${target}/js/main.js`,
+              description: 'Console debug statements present in production'
+            }
+          ],
+          totalJsFiles: jsUrlsForVulns.length,
+          foundIssues: 2
+        };
+
+      case "nmap-basic":
+      case "masscan":
+        return MockDataGenerator.generatePorts();
+
       default:
         return {
           message: `${module.name} completed successfully`,
