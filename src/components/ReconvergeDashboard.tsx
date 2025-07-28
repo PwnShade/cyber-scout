@@ -31,6 +31,8 @@ import { ScanStorage } from "@/utils/scanStorage";
 import { ModuleConfigDialog } from "./ModuleConfigDialog";
 import { ScanResultsView } from "./ScanResultsView";
 import { DependencyVisualization } from "./DependencyVisualization";
+import { ScanStatusIndicator } from "./ScanStatusIndicator";
+import { ScanLogViewer } from "./ScanLogViewer";
 
 export const ReconvergeDashboard = () => {
   const { toast } = useToast();
@@ -156,74 +158,188 @@ export const ReconvergeDashboard = () => {
     const executionOrder = DependencyResolver.getExecutionOrder(modules);
     let completedCount = 0;
 
-    // Execute modules in dependency order
+    // Execute modules in dependency order with realistic timing and error simulation
     for (const moduleId of executionOrder) {
       const module = modules.find(m => m.id === moduleId);
       if (!module) continue;
 
       // Update module status to running
-      const updatedScan = { ...scan };
-      const resultIndex = updatedScan.results.findIndex(r => r.moduleId === moduleId);
+      setScanHistory(prev => prev.map(s => 
+        s.id === scan.id 
+          ? {
+              ...s,
+              results: s.results.map(r => 
+                r.moduleId === moduleId 
+                  ? { ...r, status: 'running' as const, startTime: new Date() }
+                  : r
+              )
+            }
+          : s
+      ));
+
+      setCurrentScan(prev => prev ? {
+        ...prev,
+        results: prev.results.map(r => 
+          r.moduleId === moduleId 
+            ? { ...r, status: 'running' as const, startTime: new Date() }
+            : r
+        )
+      } : null);
+
+      // Realistic execution with incremental progress updates
+      const executionTimeMs = (module.executionTime || 5) * 1000;
+      const progressUpdates = 8;
+      const updateInterval = executionTimeMs / progressUpdates;
       
-      if (resultIndex >= 0) {
-        updatedScan.results[resultIndex] = {
-          ...updatedScan.results[resultIndex],
-          status: 'running',
-          startTime: new Date()
-        };
+      for (let i = 0; i < progressUpdates; i++) {
+        await new Promise(resolve => setTimeout(resolve, updateInterval));
         
-        updatedScan.progress = (completedCount / updatedScan.totalModules) * 100;
-        setCurrentScan(updatedScan);
-        ScanStorage.saveScan(updatedScan);
+        // Calculate sub-progress for current module
+        const moduleProgress = ((i + 1) / progressUpdates) * 100;
+        const overallProgress = Math.round(((completedCount + (moduleProgress / 100)) / modules.length) * 100);
+        
+        // Update progress in real-time
+        setCurrentScan(prev => prev ? { ...prev, progress: overallProgress } : null);
+        setScanHistory(prev => prev.map(s => 
+          s.id === scan.id ? { ...s, progress: overallProgress } : s
+        ));
       }
 
-      // Simulate execution time
-      await new Promise(resolve => 
-        setTimeout(resolve, (module.executionTime || 30) * 50) // Speed up for demo
-      );
-
-      // Generate mock results
-      const mockData = generateModuleResults(module, scan.target, updatedScan.results);
+      // Simulate occasional network timeouts or tool failures (8% chance)
+      const hasError = Math.random() < 0.08;
+      const errorMessages = [
+        `Network timeout while connecting to ${scan.target}`,
+        `Rate limiting detected - tool throttled`,
+        `DNS resolution failed for target`,
+        `Tool configuration error - missing dependencies`,
+        `SSL handshake failed`
+      ];
       
-      // Debug logging
-      console.log(`Module ${module.id} (${module.name}) generated results:`, mockData);
-      
-      // Ensure we have some data - if mock data is empty, add a default result
-      const finalData = mockData && Object.keys(mockData).length > 0 ? mockData : {
-        message: `${module.name} completed successfully`,
-        timestamp: new Date().toISOString(),
-        results: `Mock results for ${module.name}`,
-        status: 'success'
-      };
+      if (hasError) {
+        const errorMessage = errorMessages[Math.floor(Math.random() * errorMessages.length)];
+        
+        // Update to error status
+        setScanHistory(prev => prev.map(s => 
+          s.id === scan.id 
+            ? {
+                ...s,
+                results: s.results.map(r => 
+                  r.moduleId === moduleId 
+                    ? { 
+                        ...r, 
+                        status: 'error' as const, 
+                        endTime: new Date(),
+                        error: errorMessage
+                      }
+                    : r
+                )
+              }
+            : s
+        ));
 
-      // Update module status to completed
-      if (resultIndex >= 0) {
-        updatedScan.results[resultIndex] = {
-          ...updatedScan.results[resultIndex],
-          status: 'completed',
-          endTime: new Date(),
-          data: finalData
-        };
+        setCurrentScan(prev => prev ? {
+          ...prev,
+          results: prev.results.map(r => 
+            r.moduleId === moduleId 
+              ? { 
+                  ...r, 
+                  status: 'error' as const, 
+                  endTime: new Date(),
+                  error: errorMessage
+                }
+              : r
+          )
+        } : null);
+
+        toast({
+          title: "Module Error",
+          description: `${module.name}: ${errorMessage}`,
+          variant: "destructive",
+        });
+      } else {
+        // Generate realistic results with proper data chaining
+        const results = generateModuleResults(module, scan.target, scan.results);
         
-        completedCount++;
-        updatedScan.completedModules = completedCount;
-        updatedScan.progress = (completedCount / updatedScan.totalModules) * 100;
-        
-        if (completedCount === updatedScan.totalModules) {
-          updatedScan.status = 'completed';
-          updatedScan.completedAt = new Date();
-          ScanStorage.setCurrentScan(null);
-        }
-        
-        setCurrentScan(updatedScan);
-        ScanStorage.saveScan(updatedScan);
-        setScanHistory(ScanStorage.loadScans());
+        setScanHistory(prev => prev.map(s => 
+          s.id === scan.id 
+            ? {
+                ...s,
+                results: s.results.map(r => 
+                  r.moduleId === moduleId 
+                    ? { 
+                        ...r, 
+                        status: 'completed' as const, 
+                        endTime: new Date(),
+                        data: results
+                      }
+                    : r
+                )
+              }
+            : s
+        ));
+
+        setCurrentScan(prev => prev ? {
+          ...prev,
+          results: prev.results.map(r => 
+            r.moduleId === moduleId 
+              ? { 
+                  ...r, 
+                  status: 'completed' as const, 
+                  endTime: new Date(),
+                  data: results
+                }
+              : r
+          )
+        } : null);
+
+        toast({
+          title: "Module Complete",
+          description: `${module.name} finished successfully`,
+        });
       }
+      
+      completedCount++;
+      
+      // Update final progress for this module
+      const finalProgress = Math.round((completedCount / modules.length) * 100);
+      
+      setScanHistory(prev => prev.map(s => 
+        s.id === scan.id 
+          ? {
+              ...s,
+              progress: finalProgress,
+              completedModules: completedCount
+            }
+          : s
+      ));
+
+      setCurrentScan(prev => prev ? {
+        ...prev,
+        progress: finalProgress,
+        completedModules: completedCount
+      } : null);
     }
+
+    // Mark scan as completed
+    const finalScan = {
+      ...scan,
+      status: 'completed' as const,
+      completedAt: new Date(),
+      progress: 100,
+      completedModules: modules.length
+    };
+
+    setScanHistory(prev => prev.map(s => 
+      s.id === scan.id ? finalScan : s
+    ));
+    
+    setCurrentScan(finalScan);
+    ScanStorage.saveScan(finalScan);
+    ScanStorage.setCurrentScan(null);
 
     toast({
       title: "Scan Complete",
-      description: `Reconnaissance of ${scan.target} completed successfully`,
+      description: `Reconnaissance of ${scan.target} completed with ${modules.length - scan.results.filter(r => r.status === 'error').length}/${modules.length} modules successful`,
     });
   };
 
@@ -830,12 +946,6 @@ export const ReconvergeDashboard = () => {
                         </CardDescription>
                       </div>
                       <div className="flex items-center gap-2">
-                        <Badge 
-                          variant={currentScan.status === 'running' ? 'default' : 'secondary'}
-                          className={currentScan.status === 'running' ? 'bg-cyber-green/20 text-cyber-green border-cyber-green/30' : ''}
-                        >
-                          {currentScan.status}
-                        </Badge>
                         {currentScan.status === 'running' && (
                           <Button
                             variant="outline"
@@ -850,70 +960,93 @@ export const ReconvergeDashboard = () => {
                       </div>
                     </div>
                   </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="space-y-2">
-                      <div className="flex justify-between text-sm">
-                        <span>Progress</span>
-                        <span>{Math.round(currentScan.progress)}% ({currentScan.completedModules}/{currentScan.totalModules})</span>
-                      </div>
-                      <Progress value={currentScan.progress} className="w-full" />
-                    </div>
+                  <CardContent>
+                    <ScanStatusIndicator scan={currentScan} />
                   </CardContent>
                 </Card>
 
-                {/* Real-time Results */}
-                <Card className="border-cyber-green/20 shadow-lg">
-                  <CardHeader>
-                    <CardTitle>Live Results</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="space-y-3">
-                      {currentScan.results.map(result => {
-                        const module = reconModules.find(m => m.id === result.moduleId);
-                        const Icon = module?.icon || CheckCircle;
-                        
-                        return (
-                          <div
-                            key={result.id}
-                            className="flex items-center gap-3 p-3 border border-border rounded-lg"
-                          >
-                            <Icon className="h-5 w-5 text-cyber-green" />
-                            <div className="flex-1">
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium">{result.moduleName}</span>
-                                <Badge 
-                                  variant={result.status === 'completed' ? 'default' : 'secondary'}
-                                  className={result.status === 'completed' ? 'bg-cyber-green/20 text-cyber-green border-cyber-green/30' : ''}
-                                >
-                                  {result.status}
-                                </Badge>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* Real-time Results */}
+                  <Card className="border-cyber-green/20 shadow-lg">
+                    <CardHeader>
+                      <CardTitle className="flex items-center gap-2">
+                        <Zap className="h-4 w-4 text-cyber-blue" />
+                        Live Module Status
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="space-y-3 max-h-96 overflow-y-auto">
+                        {currentScan.results.map(result => {
+                          const module = reconModules.find(m => m.id === result.moduleId);
+                          const Icon = module?.icon || CheckCircle;
+                          
+                          const getStatusIcon = () => {
+                            switch (result.status) {
+                              case 'running':
+                                return <Zap className="h-4 w-4 text-cyber-blue animate-pulse" />;
+                              case 'completed':
+                                return <CheckCircle className="h-4 w-4 text-cyber-green" />;
+                              case 'error':
+                                return <AlertTriangle className="h-4 w-4 text-destructive" />;
+                              default:
+                                return <Clock className="h-4 w-4 text-muted-foreground" />;
+                            }
+                          };
+
+                          const getStatusColor = () => {
+                            switch (result.status) {
+                              case 'running':
+                                return 'bg-cyber-blue/20 text-cyber-blue border-cyber-blue/30';
+                              case 'completed':
+                                return 'bg-cyber-green/20 text-cyber-green border-cyber-green/30';
+                              case 'error':
+                                return 'bg-destructive/20 text-destructive border-destructive/30';
+                              default:
+                                return 'bg-muted text-muted-foreground';
+                            }
+                          };
+                          
+                          return (
+                            <div
+                              key={result.id}
+                              className="flex items-center gap-3 p-3 border border-border rounded-lg"
+                            >
+                              <Icon className="h-4 w-4 text-cyber-green flex-shrink-0" />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="font-medium text-sm truncate">{result.moduleName}</span>
+                                  <Badge variant="outline" className={`text-xs ${getStatusColor()}`}>
+                                    {result.status}
+                                  </Badge>
+                                </div>
+                                {result.status === 'running' && (
+                                  <div className="text-xs text-muted-foreground">
+                                    Executing reconnaissance tasks...
+                                  </div>
+                                )}
+                                {result.status === 'completed' && (
+                                  <div className="text-xs text-muted-foreground">
+                                    Completed in {result.endTime && result.startTime ? 
+                                      Math.round((result.endTime.getTime() - result.startTime.getTime()) / 1000) : 0}s
+                                  </div>
+                                )}
+                                {result.status === 'error' && result.error && (
+                                  <div className="text-xs text-destructive">
+                                    {result.error}
+                                  </div>
+                                )}
                               </div>
-                              {result.status === 'running' && (
-                                <div className="text-sm text-muted-foreground">
-                                  Executing...
-                                </div>
-                              )}
-                              {result.status === 'completed' && (
-                                <div className="text-sm text-muted-foreground">
-                                  Completed in {result.endTime && result.startTime ? 
-                                    Math.round((result.endTime.getTime() - result.startTime.getTime()) / 1000) : 0}s
-                                </div>
-                              )}
+                              {getStatusIcon()}
                             </div>
-                            {result.status === 'running' && (
-                              <div className="flex items-center gap-2">
-                                <Clock className="h-4 w-4 text-cyber-blue animate-pulse" />
-                              </div>
-                            )}
-                            {result.status === 'completed' && (
-                              <CheckCircle className="h-4 w-4 text-cyber-green" />
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </CardContent>
-                </Card>
+                          );
+                        })}
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  {/* Activity Log */}
+                  <ScanLogViewer scan={currentScan} />
+                </div>
               </>
             ) : (
               <Card className="border-cyber-green/20">
