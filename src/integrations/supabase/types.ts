@@ -14,7 +14,134 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      profiles: {
+        Row: {
+          created_at: string
+          id: string
+          updated_at: string
+          user_id: string
+          username: string | null
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          updated_at?: string
+          user_id: string
+          username?: string | null
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          updated_at?: string
+          user_id?: string
+          username?: string | null
+        }
+        Relationships: []
+      }
+      scan_results: {
+        Row: {
+          completed_at: string | null
+          created_at: string
+          data: Json | null
+          depends_on: string[] | null
+          error_message: string | null
+          id: string
+          module_id: string
+          module_name: string
+          scan_id: string
+          started_at: string | null
+          status: string
+        }
+        Insert: {
+          completed_at?: string | null
+          created_at?: string
+          data?: Json | null
+          depends_on?: string[] | null
+          error_message?: string | null
+          id?: string
+          module_id: string
+          module_name: string
+          scan_id: string
+          started_at?: string | null
+          status?: string
+        }
+        Update: {
+          completed_at?: string | null
+          created_at?: string
+          data?: Json | null
+          depends_on?: string[] | null
+          error_message?: string | null
+          id?: string
+          module_id?: string
+          module_name?: string
+          scan_id?: string
+          started_at?: string | null
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "scan_results_scan_id_fkey"
+            columns: ["scan_id"]
+            isOneToOne: false
+            referencedRelation: "scans"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      scans: {
+        Row: {
+          completed_at: string | null
+          completed_modules: number | null
+          created_at: string
+          execution_order: string[] | null
+          id: string
+          module_options: Json | null
+          name: string
+          progress: number | null
+          selected_modules: string[]
+          started_at: string | null
+          status: string
+          target: string
+          total_modules: number | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          completed_at?: string | null
+          completed_modules?: number | null
+          created_at?: string
+          execution_order?: string[] | null
+          id?: string
+          module_options?: Json | null
+          name: string
+          progress?: number | null
+          selected_modules?: string[]
+          started_at?: string | null
+          status?: string
+          target: string
+          total_modules?: number | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          completed_at?: string | null
+          completed_modules?: number | null
+          created_at?: string
+          execution_order?: string[] | null
+          id?: string
+          module_options?: Json | null
+          name?: string
+          progress?: number | null
+          selected_modules?: string[]
+          started_at?: string | null
+          status?: string
+          target?: string
+          total_modules?: number | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
