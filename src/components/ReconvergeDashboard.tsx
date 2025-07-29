@@ -23,19 +23,22 @@ import {
   Zap
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/hooks/useAuth";
 import { reconModules, moduleCategories } from "@/data/modules";
 import { ReconModule, Scan, ScanResult } from "@/types/recon";
 import { DependencyResolver } from "@/utils/dependencyChain";
-import { MockDataGenerator } from "@/utils/mockDataGenerator";
-import { ScanStorage } from "@/utils/scanStorage";
+import { ScanService } from "@/services/scanService";
+import { supabase } from "@/integrations/supabase/client";
 import { ModuleConfigDialog } from "./ModuleConfigDialog";
 import { ScanResultsView } from "./ScanResultsView";
 import { DependencyVisualization } from "./DependencyVisualization";
 import { ScanStatusIndicator } from "./ScanStatusIndicator";
 import { ScanLogViewer } from "./ScanLogViewer";
+import { AuthHeader } from "./AuthHeader";
 
 export const ReconvergeDashboard = () => {
   const { toast } = useToast();
+  const { user } = useAuth();
   const [target, setTarget] = useState("");
   const [scanName, setScanName] = useState("");
   const [selectedModules, setSelectedModules] = useState<string[]>(
@@ -47,21 +50,38 @@ export const ReconvergeDashboard = () => {
   const [activeTab, setActiveTab] = useState("create");
   const [configModule, setConfigModule] = useState<ReconModule | null>(null);
   const [viewingScan, setViewingScan] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   // Load scan history on mount
   useEffect(() => {
-    const history = ScanStorage.loadScans();
-    setScanHistory(history);
-    
-    const currentScanId = ScanStorage.getCurrentScanId();
-    if (currentScanId) {
-      const scan = ScanStorage.getScan(currentScanId);
-      if (scan && scan.status === 'running') {
-        setCurrentScan(scan);
+    if (user) {
+      loadScanHistory();
+    }
+  }, [user]);
+
+  const loadScanHistory = async () => {
+    try {
+      setLoading(true);
+      const scans = await ScanService.getUserScans();
+      setScanHistory(scans);
+      
+      // Check for running scan
+      const runningScan = scans.find(s => s.status === 'running');
+      if (runningScan) {
+        setCurrentScan(runningScan);
         setActiveTab("monitor");
       }
+    } catch (error) {
+      console.error('Error loading scan history:', error);
+      toast({
+        title: "Error",
+        description: "Failed to load scan history",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
     }
-  }, []);
+  };
 
   const getSelectedModuleObjects = (): ReconModule[] => {
     return reconModules.filter(m => selectedModules.includes(m.id));
@@ -108,559 +128,185 @@ export const ReconvergeDashboard = () => {
     startScan();
   };
 
-  const startScan = () => {
-    const modules = getSelectedModuleObjects();
-    const executionOrder = DependencyResolver.getExecutionOrder(modules);
-    const totalTime = DependencyResolver.estimateTotalTime(modules);
+  const startScan = async () => {
+    try {
+      const modules = getSelectedModuleObjects();
+      const executionOrder = DependencyResolver.getExecutionOrder(modules);
 
-    const scan: Scan = {
-      id: `scan_${Date.now()}`,
-      target: target.trim(),
-      name: scanName.trim() || `Scan of ${target.trim()}`,
-      status: 'running',
-      createdAt: new Date(),
-      startedAt: new Date(),
-      selectedModules,
-      moduleOptions,
-      results: [],
-      executionOrder,
-      progress: 0,
-      totalModules: modules.length,
-      completedModules: 0
-    };
+      const scanData: Omit<Scan, 'id' | 'createdAt'> = {
+        target: target.trim(),
+        name: scanName.trim() || `Scan of ${target.trim()}`,
+        status: 'running',
+        startedAt: new Date(),
+        selectedModules,
+        moduleOptions,
+        results: [],
+        executionOrder,
+        progress: 0,
+        totalModules: modules.length,
+        completedModules: 0
+      };
 
-    // Initialize results
-    scan.results = modules.map(module => ({
-      id: `${scan.id}_${module.id}`,
-      moduleId: module.id,
-      moduleName: module.name,
-      status: 'pending',
-      data: {},
-      dependsOn: []
-    }));
+      const createdScan = await ScanService.createScan(scanData);
+      
+      // Initialize results
+      for (const module of modules) {
+        await ScanService.createScanResult(createdScan.id, {
+          moduleId: module.id,
+          moduleName: module.name,
+          status: 'pending',
+          data: {},
+          dependsOn: []
+        });
+      }
 
-    setCurrentScan(scan);
-    ScanStorage.saveScan(scan);
-    ScanStorage.setCurrentScan(scan.id);
-    setActiveTab("monitor");
+      // Reload the scan with results
+      const scanWithResults = await ScanService.getScanById(createdScan.id);
+      if (scanWithResults) {
+        setCurrentScan(scanWithResults);
+        setScanHistory(prev => [scanWithResults, ...prev]);
+        setActiveTab("monitor");
 
-    toast({
-      title: "Scan Started",
-      description: `Starting reconnaissance of ${target}`,
-    });
+        toast({
+          title: "Scan Started",
+          description: `Starting reconnaissance of ${target}`,
+        });
 
-    // Simulate scan execution
-    simulateScanExecution(scan, totalTime);
+        // Start execution
+        executeRealScan(scanWithResults);
+      }
+    } catch (error) {
+      console.error('Error starting scan:', error);
+      toast({
+        title: "Error",
+        description: "Failed to start scan",
+        variant: "destructive",
+      });
+    }
   };
 
-  const simulateScanExecution = async (scan: Scan, totalTime: number) => {
+  const executeRealScan = async (scan: Scan) => {
     const modules = getSelectedModuleObjects();
     const executionOrder = DependencyResolver.getExecutionOrder(modules);
     let completedCount = 0;
 
-    // Execute modules in dependency order with realistic timing and error simulation
     for (const moduleId of executionOrder) {
       const module = modules.find(m => m.id === moduleId);
       if (!module) continue;
 
-      // Update module status to running
-      setScanHistory(prev => prev.map(s => 
-        s.id === scan.id 
-          ? {
-              ...s,
-              results: s.results.map(r => 
-                r.moduleId === moduleId 
-                  ? { ...r, status: 'running' as const, startTime: new Date() }
-                  : r
-              )
-            }
-          : s
-      ));
+      try {
+        // Update module to running
+        const resultToUpdate = scan.results.find(r => r.moduleId === moduleId);
+        if (resultToUpdate) {
+          await ScanService.updateScanResult(resultToUpdate.id, {
+            status: 'running',
+            startTime: new Date()
+          });
+        }
 
-      setCurrentScan(prev => prev ? {
-        ...prev,
-        results: prev.results.map(r => 
-          r.moduleId === moduleId 
-            ? { ...r, status: 'running' as const, startTime: new Date() }
-            : r
-        )
-      } : null);
-
-      // Realistic execution with incremental progress updates
-      const executionTimeMs = (module.executionTime || 5) * 1000;
-      const progressUpdates = 8;
-      const updateInterval = executionTimeMs / progressUpdates;
-      
-      for (let i = 0; i < progressUpdates; i++) {
-        await new Promise(resolve => setTimeout(resolve, updateInterval));
-        
-        // Calculate sub-progress for current module
-        const moduleProgress = ((i + 1) / progressUpdates) * 100;
-        const overallProgress = Math.round(((completedCount + (moduleProgress / 100)) / modules.length) * 100);
-        
-        // Update progress in real-time
-        setCurrentScan(prev => prev ? { ...prev, progress: overallProgress } : null);
-        setScanHistory(prev => prev.map(s => 
-          s.id === scan.id ? { ...s, progress: overallProgress } : s
-        ));
-      }
-
-      // Simulate occasional network timeouts or tool failures (8% chance)
-      const hasError = Math.random() < 0.08;
-      const errorMessages = [
-        `Network timeout while connecting to ${scan.target}`,
-        `Rate limiting detected - tool throttled`,
-        `DNS resolution failed for target`,
-        `Tool configuration error - missing dependencies`,
-        `SSL handshake failed`
-      ];
-      
-      if (hasError) {
-        const errorMessage = errorMessages[Math.floor(Math.random() * errorMessages.length)];
-        
-        // Update to error status
-        setScanHistory(prev => prev.map(s => 
-          s.id === scan.id 
-            ? {
-                ...s,
-                results: s.results.map(r => 
-                  r.moduleId === moduleId 
-                    ? { 
-                        ...r, 
-                        status: 'error' as const, 
-                        endTime: new Date(),
-                        error: errorMessage
-                      }
-                    : r
-                )
-              }
-            : s
-        ));
-
-        setCurrentScan(prev => prev ? {
-          ...prev,
-          results: prev.results.map(r => 
-            r.moduleId === moduleId 
-              ? { 
-                  ...r, 
-                  status: 'error' as const, 
-                  endTime: new Date(),
-                  error: errorMessage
-                }
-              : r
-          )
-        } : null);
-
-        toast({
-          title: "Module Error",
-          description: `${module.name}: ${errorMessage}`,
-          variant: "destructive",
+        // Call the edge function to execute the module
+        const { data, error } = await supabase.functions.invoke('recon-scanner', {
+          body: {
+            scanId: scan.id,
+            moduleId,
+            target: scan.target,
+            options: scan.moduleOptions[moduleId] || {}
+          }
         });
-      } else {
-        // Generate realistic results with proper data chaining
-        const results = generateModuleResults(module, scan.target, scan.results);
-        
-        setScanHistory(prev => prev.map(s => 
-          s.id === scan.id 
-            ? {
-                ...s,
-                results: s.results.map(r => 
-                  r.moduleId === moduleId 
-                    ? { 
-                        ...r, 
-                        status: 'completed' as const, 
-                        endTime: new Date(),
-                        data: results
-                      }
-                    : r
-                )
-              }
-            : s
-        ));
 
-        setCurrentScan(prev => prev ? {
-          ...prev,
-          results: prev.results.map(r => 
-            r.moduleId === moduleId 
-              ? { 
-                  ...r, 
-                  status: 'completed' as const, 
-                  endTime: new Date(),
-                  data: results
-                }
-              : r
-          )
-        } : null);
+        if (error) throw error;
+
+        completedCount++;
+        const progress = Math.round((completedCount / modules.length) * 100);
+
+        // Update scan progress
+        await ScanService.updateScan(scan.id, {
+          progress,
+          completedModules: completedCount
+        });
+
+        // Update local state
+        setCurrentScan(prev => prev ? { ...prev, progress, completedModules: completedCount } : null);
+        setScanHistory(prev => prev.map(s => 
+          s.id === scan.id ? { ...s, progress, completedModules: completedCount } : s
+        ));
 
         toast({
           title: "Module Complete",
           description: `${module.name} finished successfully`,
         });
-      }
-      
-      completedCount++;
-      
-      // Update final progress for this module
-      const finalProgress = Math.round((completedCount / modules.length) * 100);
-      
-      setScanHistory(prev => prev.map(s => 
-        s.id === scan.id 
-          ? {
-              ...s,
-              progress: finalProgress,
-              completedModules: completedCount
-            }
-          : s
-      ));
 
-      setCurrentScan(prev => prev ? {
-        ...prev,
-        progress: finalProgress,
-        completedModules: completedCount
-      } : null);
+      } catch (error) {
+        console.error(`Error executing module ${moduleId}:`, error);
+        
+        // Update module to error state
+        const resultToUpdate = scan.results.find(r => r.moduleId === moduleId);
+        if (resultToUpdate) {
+          await ScanService.updateScanResult(resultToUpdate.id, {
+            status: 'error',
+            error: error.message,
+            endTime: new Date()
+          });
+        }
+
+        toast({
+          title: "Module Error",
+          description: `${module.name}: ${error.message}`,
+          variant: "destructive",
+        });
+      }
     }
 
     // Mark scan as completed
-    const finalScan = {
-      ...scan,
-      status: 'completed' as const,
+    await ScanService.updateScan(scan.id, {
+      status: 'completed',
       completedAt: new Date(),
-      progress: 100,
-      completedModules: modules.length
-    };
+      progress: 100
+    });
 
+    setCurrentScan(prev => prev ? { ...prev, status: 'completed', progress: 100 } : null);
     setScanHistory(prev => prev.map(s => 
-      s.id === scan.id ? finalScan : s
+      s.id === scan.id ? { ...s, status: 'completed', progress: 100 } : s
     ));
-    
-    setCurrentScan(finalScan);
-    ScanStorage.saveScan(finalScan);
-    ScanStorage.setCurrentScan(null);
 
     toast({
       title: "Scan Complete",
-      description: `Reconnaissance of ${scan.target} completed with ${modules.length - scan.results.filter(r => r.status === 'error').length}/${modules.length} modules successful`,
+      description: `Reconnaissance of ${scan.target} completed`,
     });
   };
 
-  const generateModuleResults = (module: ReconModule, target: string, existingResults: ScanResult[]) => {
-    // Get data from previous modules for chaining
-    const getPreviousData = (dataType: string) => {
-      const producers = existingResults.filter(r => 
-        r.status === 'completed' && 
-        reconModules.find(m => m.id === r.moduleId)?.produces.includes(dataType)
-      );
-      return producers.length > 0 ? producers[0].data : null;
-    };
-
-    switch (module.id) {
-      case "subfinder":
-      case "amass":
-        return {
-          subdomains: MockDataGenerator.generateSubdomains(target),
-          count: MockDataGenerator.generateSubdomains(target).length
-        };
-
-      case "httpx":
-        const subdomains = getPreviousData('subdomains')?.subdomains || MockDataGenerator.generateSubdomains(target);
-        const aliveUrls = MockDataGenerator.generateAliveUrls(subdomains);
-        return {
-          aliveUrls,
-          totalChecked: subdomains.length,
-          aliveCount: aliveUrls.length
-        };
-
-      case "dnsx":
-        return {
-          resolvedIPs: MockDataGenerator.generateSubdomains(target).map(sub => ({
-            domain: sub,
-            ip: `${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`
-          }))
-        };
-
-      case "ffuf":
-      case "dirsearch":
-        return {
-          directories: MockDataGenerator.generateDirectories(),
-          files: MockDataGenerator.generateFiles(),
-          totalRequests: 1250,
-          foundItems: MockDataGenerator.generateDirectories().length + MockDataGenerator.generateFiles().length
-        };
-
-      case "robots-sitemap":
-        return {
-          robotsEntries: MockDataGenerator.generateDirectories().slice(0, 5),
-          sitemapUrls: MockDataGenerator.generateDirectories().slice(0, 8).map(dir => `https://${target}${dir}`)
-        };
-
-      case "gau":
-      case "waybackurls":
-        return {
-          historicalUrls: MockDataGenerator.generateDirectories().map(dir => `https://${target}${dir}`),
-          totalFound: 156,
-          uniqueUrls: 89
-        };
-
-      case "wappalyzer":
-      case "builtwith":
-        return {
-          technologies: MockDataGenerator.generateTechnologies()
-        };
-
-      case "nuclei-general":
-        return {
-          vulnerabilities: MockDataGenerator.generateVulnerabilities(target),
-          totalTemplates: 4500,
-          executedTemplates: 4500
-        };
-
-      case "sslyze":
-      case "testssl":
-        return MockDataGenerator.generateSSLInfo(target);
-
-      case "security-headers":
-        const aliveUrlsForHeaders = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
-        return {
-          headers: aliveUrlsForHeaders.slice(0, 3).map(url => MockDataGenerator.generateSecurityHeaders(url))
-        };
-
-      case "gowitness":
-      case "aquatone":
-        const urlsForScreenshots = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
-        return {
-          screenshots: MockDataGenerator.generateScreenshots(urlsForScreenshots)
-        };
-
-      case "arjun":
-        const urlsForParams = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
-        return {
-          parameters: urlsForParams.slice(0, 3).flatMap(url => MockDataGenerator.generateParameters(url)),
-          totalUrls: urlsForParams.length,
-          foundParameters: 24
-        };
-
-      case "linkfinder":
-        const jsUrls = getPreviousData('js-urls')?.jsFiles || [`https://${target}/js/app.js`];
-        return {
-          endpoints: jsUrls.flatMap(jsUrl => MockDataGenerator.generateEndpoints(jsUrl)),
-          totalJsFiles: jsUrls.length,
-          foundEndpoints: 18
-        };
-
-      case "secretfinder":
-        const jsUrlsForSecrets = getPreviousData('js-urls')?.jsFiles || [`https://${target}/js/app.js`];
-        return {
-          secrets: jsUrlsForSecrets.flatMap(jsUrl => MockDataGenerator.generateSecrets(jsUrl)),
-          totalJsFiles: jsUrlsForSecrets.length,
-          foundSecrets: 3
-        };
-
-      case "js-file-discovery":
-        const aliveUrlsForJs = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
-        return {
-          jsFiles: aliveUrlsForJs.flatMap(url => [
-            `${url}/js/app.js`,
-            `${url}/assets/main.js`,
-            `${url}/static/bundle.js`
-          ]).slice(0, 12),
-          totalUrls: aliveUrlsForJs.length,
-          foundJsFiles: 12
-        };
-
-      case "gobuster-vhost":
-        return {
-          virtualHosts: [
-            `admin.${target}`,
-            `api.${target}`,
-            `staging.${target}`,
-            `dev.${target}`,
-            `test.${target}`
-          ],
-          totalAttempts: 4500,
-          foundVhosts: 5
-        };
-
-      case "cookie-flags":
-        const urlsForCookies = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
-        return {
-          cookieAnalysis: urlsForCookies.slice(0, 3).map(url => ({
-            url,
-            cookies: [
-              { name: 'sessionid', secure: true, httpOnly: true, sameSite: 'Strict' },
-              { name: 'csrf_token', secure: false, httpOnly: false, sameSite: 'Lax' },
-              { name: 'user_pref', secure: false, httpOnly: false, sameSite: 'None' }
-            ],
-            securityIssues: ['Missing Secure flag on csrf_token', 'Missing HttpOnly on user_pref']
-          })),
-          totalUrls: urlsForCookies.length
-        };
-
-      case "cors-analyzer":
-        const urlsForCors = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
-        return {
-          corsFindings: urlsForCors.slice(0, 3).map(url => ({
-            url,
-            accessControlAllowOrigin: '*',
-            accessControlAllowCredentials: 'true',
-            vulnerable: true,
-            riskLevel: 'High'
-          })),
-          totalUrls: urlsForCors.length,
-          vulnerableEndpoints: 2
-        };
-
-      case "nuclei-js":
-        const jsUrlsForVulns = getPreviousData('js-urls')?.jsFiles || [`https://${target}/js/app.js`];
-        return {
-          jsVulnerabilities: [
-            {
-              severity: 'Medium',
-              title: 'Exposed API Key in JavaScript',
-              file: jsUrlsForVulns[0] || `https://${target}/js/app.js`,
-              description: 'API key found hardcoded in JavaScript file'
-            },
-            {
-              severity: 'Low',
-              title: 'Debug Information Leak',
-              file: jsUrlsForVulns[1] || `https://${target}/js/main.js`,
-              description: 'Console debug statements present in production'
-            }
-          ],
-          totalJsFiles: jsUrlsForVulns.length,
-          foundIssues: 2
-        };
-
-      case "nmap-basic":
-      case "masscan":
-        return MockDataGenerator.generatePorts();
-
-      case "corsy":
-        const urlsForCorsy = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
-        return {
-          corsFindings: urlsForCorsy.slice(0, 3).map(url => ({
-            url,
-            corsEnabled: true,
-            accessControlAllowOrigin: '*',
-            accessControlAllowCredentials: 'true',
-            vulnerable: true,
-            riskLevel: 'High',
-            details: 'Wildcard origin with credentials allowed'
-          })),
-          totalUrls: urlsForCorsy.length,
-          vulnerableEndpoints: 2
-        };
-
-      case "nuclei-cors":
-        const urlsForNucleiCors = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
-        return {
-          corsVulnerabilities: [
-            {
-              severity: 'High',
-              title: 'CORS Wildcard with Credentials',
-              url: urlsForNucleiCors[0] || `https://${target}`,
-              description: 'Server allows wildcard origin with credentials'
-            },
-            {
-              severity: 'Medium', 
-              title: 'CORS Reflected Origin',
-              url: urlsForNucleiCors[1] || `https://${target}/api`,
-              description: 'Server reflects arbitrary origins in CORS headers'
-            }
-          ],
-          totalUrls: urlsForNucleiCors.length,
-          foundIssues: 2
-        };
-
-      case "nuclei-open-redirect":
-        const urlsForRedirect = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
-        return {
-          redirectVulnerabilities: [
-            {
-              severity: 'Medium',
-              title: 'Open Redirect Vulnerability',
-              url: `${urlsForRedirect[0] || `https://${target}`}/redirect?url=`,
-              description: 'Application redirects to arbitrary URLs'
-            }
-          ],
-          totalUrls: urlsForRedirect.length,
-          foundIssues: 1
-        };
-
-      case "nuclei-host-header":
-        const urlsForHost = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
-        return {
-          hostHeaderVulnerabilities: [
-            {
-              severity: 'Medium',
-              title: 'Host Header Injection',
-              url: urlsForHost[0] || `https://${target}`,
-              description: 'Application accepts arbitrary host headers'
-            }
-          ],
-          totalUrls: urlsForHost.length,
-          foundIssues: 1
-        };
-
-      case "retire-js":
-        const urlsForRetire = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
-        return {
-          jsVulnerabilities: [
-            {
-              severity: 'High',
-              title: 'jQuery 1.8.3 - Known Vulnerabilities',
-              library: 'jquery',
-              version: '1.8.3',
-              url: `${urlsForRetire[0] || `https://${target}`}/js/jquery.min.js`,
-              cve: ['CVE-2020-11022', 'CVE-2020-11023']
-            },
-            {
-              severity: 'Medium',
-              title: 'Bootstrap 3.3.7 - XSS Vulnerability',
-              library: 'bootstrap',
-              version: '3.3.7',
-              url: `${urlsForRetire[0] || `https://${target}`}/css/bootstrap.min.css`,
-              cve: ['CVE-2019-8331']
-            }
-          ],
-          totalLibraries: 15,
-          vulnerableLibraries: 2
-        };
-
-      case "favicon-hash":
-        const urlsForFavicon = getPreviousData('alive-urls')?.aliveUrls || [`https://${target}`];
-        return {
-          faviconHashes: urlsForFavicon.slice(0, 3).map(url => ({
-            url,
-            hash: 'mmhash:' + Math.random().toString(36).substr(2, 9),
-            technology: Math.random() > 0.5 ? 'Apache' : 'Nginx',
-            confidence: Math.floor(Math.random() * 30) + 70
-          })),
-          totalUrls: urlsForFavicon.length,
-          identifiedTechnologies: 2
-        };
-
-      default:
-        return {
-          message: `${module.name} completed successfully`,
-          timestamp: new Date().toISOString()
-        };
-    }
-  };
-
-  const pauseScan = () => {
+  const pauseScan = async () => {
     if (currentScan) {
-      const updatedScan = { ...currentScan, status: 'paused' as const };
-      setCurrentScan(updatedScan);
-      ScanStorage.saveScan(updatedScan);
+      try {
+        await ScanService.updateScan(currentScan.id, { status: 'paused' });
+        setCurrentScan(prev => prev ? { ...prev, status: 'paused' } : null);
+      } catch (error) {
+        toast({
+          title: "Error",
+          description: "Failed to pause scan",
+          variant: "destructive",
+        });
+      }
     }
   };
 
-  const deleteScan = (scanId: string) => {
-    ScanStorage.deleteScan(scanId);
-    setScanHistory(ScanStorage.loadScans());
-    if (currentScan?.id === scanId) {
-      setCurrentScan(null);
-      ScanStorage.setCurrentScan(null);
+  const deleteScan = async (scanId: string) => {
+    try {
+      await ScanService.deleteScan(scanId);
+      setScanHistory(prev => prev.filter(s => s.id !== scanId));
+      if (currentScan?.id === scanId) {
+        setCurrentScan(null);
+      }
+      toast({
+        title: "Scan Deleted",
+        description: "Scan has been deleted successfully",
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to delete scan",
+        variant: "destructive",
+      });
     }
   };
 
@@ -705,510 +351,516 @@ export const ReconvergeDashboard = () => {
     }
   }
 
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-background via-background to-muted/20 p-6">
-      <div className="max-w-7xl mx-auto space-y-6">
-        {/* Header */}
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-background via-background to-muted/20 flex items-center justify-center">
         <div className="text-center space-y-4">
-          <div className="flex items-center justify-center gap-3">
-            <Target className="h-8 w-8 text-cyber-green animate-pulse-glow" />
-            <h1 className="text-4xl font-bold bg-gradient-to-r from-cyber-green to-cyber-blue bg-clip-text text-transparent">
-              Reconverge
-            </h1>
-          </div>
-          <p className="text-xl text-muted-foreground">
-            Advanced Web Reconnaissance Toolkit
-          </p>
-          <div className="flex items-center justify-center gap-4 text-sm text-muted-foreground">
-            <span className="flex items-center gap-1">
-              <Globe2 className="h-4 w-4 text-cyber-green" />
-              {reconModules.length} Modules
-            </span>
-            <span className="flex items-center gap-1">
-              <Zap className="h-4 w-4 text-cyber-blue" />
-              Smart Chaining
-            </span>
-            <span className="flex items-center gap-1">
-              <History className="h-4 w-4 text-cyber-purple" />
-              {scanHistory.length} Scans
-            </span>
-          </div>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-cyber-green mx-auto"></div>
+          <p className="text-muted-foreground">Loading reconnaissance dashboard...</p>
         </div>
+      </div>
+    );
+  }
 
-        {/* Main Tabs */}
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
-          <TabsList className="grid w-full grid-cols-4 bg-secondary/50">
-            <TabsTrigger value="create" className="flex items-center gap-2">
-              <Target className="h-4 w-4" />
-              Create Scan
-            </TabsTrigger>
-            <TabsTrigger value="monitor" className="flex items-center gap-2">
-              <Play className="h-4 w-4" />
-              Monitor
-            </TabsTrigger>
-            <TabsTrigger value="history" className="flex items-center gap-2">
-              <History className="h-4 w-4" />
-              History
-            </TabsTrigger>
-            <TabsTrigger value="modules" className="flex items-center gap-2">
-              <Settings className="h-4 w-4" />
-              Modules
-            </TabsTrigger>
-          </TabsList>
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-background via-background to-muted/20">
+      <AuthHeader />
+      
+      <div className="p-6">
+        <div className="max-w-7xl mx-auto space-y-6">
+          {/* Header */}
+          <div className="text-center space-y-4">
+            <div className="flex items-center justify-center gap-3">
+              <Target className="h-8 w-8 text-cyber-green animate-pulse-glow" />
+              <h1 className="text-4xl font-bold bg-gradient-to-r from-cyber-green to-cyber-blue bg-clip-text text-transparent">
+                ReconWeb Pro
+              </h1>
+            </div>
+            <p className="text-xl text-muted-foreground">
+              Advanced Web Reconnaissance Platform
+            </p>
+            <div className="flex items-center justify-center gap-4 text-sm text-muted-foreground">
+              <span className="flex items-center gap-1">
+                <Globe2 className="h-4 w-4 text-cyber-green" />
+                {reconModules.length} Modules
+              </span>
+              <span className="flex items-center gap-1">
+                <Zap className="h-4 w-4 text-cyber-blue" />
+                Real-time Execution
+              </span>
+              <span className="flex items-center gap-1">
+                <History className="h-4 w-4 text-cyber-purple" />
+                {scanHistory.length} Scans
+              </span>
+            </div>
+          </div>
 
-          {/* Create Scan Tab */}
-          <TabsContent value="create" className="space-y-6">
-            <Card className="border-cyber-green/20 shadow-lg">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Target className="h-5 w-5 text-cyber-green" />
-                  Target Configuration
-                </CardTitle>
-                <CardDescription>
-                  Configure your reconnaissance target and scan parameters
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Target Domain</label>
-                    <Input
-                      placeholder="example.com"
-                      value={target}
-                      onChange={(e) => setTarget(e.target.value)}
-                      className="bg-secondary/50 border-cyber-green/30 focus:border-cyber-green"
-                    />
+          {/* Main Tabs */}
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
+            <TabsList className="grid w-full grid-cols-4 bg-secondary/50">
+              <TabsTrigger value="create" className="flex items-center gap-2">
+                <Target className="h-4 w-4" />
+                Create Scan
+              </TabsTrigger>
+              <TabsTrigger value="monitor" className="flex items-center gap-2">
+                <Play className="h-4 w-4" />
+                Monitor
+              </TabsTrigger>
+              <TabsTrigger value="history" className="flex items-center gap-2">
+                <History className="h-4 w-4" />
+                History
+              </TabsTrigger>
+              <TabsTrigger value="modules" className="flex items-center gap-2">
+                <Settings className="h-4 w-4" />
+                Modules
+              </TabsTrigger>
+            </TabsList>
+
+            {/* Create Scan Tab */}
+            <TabsContent value="create" className="space-y-6">
+              <Card className="border-cyber-green/20 shadow-lg">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Target className="h-5 w-5 text-cyber-green" />
+                    Target Configuration
+                  </CardTitle>
+                  <CardDescription>
+                    Configure your reconnaissance target and scan parameters
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Target Domain</label>
+                      <Input
+                        placeholder="example.com"
+                        value={target}
+                        onChange={(e) => setTarget(e.target.value)}
+                        className="bg-secondary/50 border-cyber-green/30 focus:border-cyber-green"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Scan Name (Optional)</label>
+                      <Input
+                        placeholder="My reconnaissance scan"
+                        value={scanName}
+                        onChange={(e) => setScanName(e.target.value)}
+                        className="bg-secondary/50 border-cyber-green/30 focus:border-cyber-green"
+                      />
+                    </div>
                   </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">Scan Name (Optional)</label>
-                    <Input
-                      placeholder="My reconnaissance scan"
-                      value={scanName}
-                      onChange={(e) => setScanName(e.target.value)}
-                      className="bg-secondary/50 border-cyber-green/30 focus:border-cyber-green"
-                    />
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
 
-            {/* Module Selection */}
-            <Card className="border-cyber-green/20 shadow-lg">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Settings className="h-5 w-5 text-cyber-green" />
-                  Module Selection
-                </CardTitle>
-                <CardDescription>
-                  Choose reconnaissance modules and configure options
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-6">
-                  {moduleCategories.map(category => {
-                    const categoryModules = reconModules.filter(m => m.category === category);
-                    const selectedInCategory = categoryModules.filter(m => selectedModules.includes(m.id));
-                    
-                    return (
-                      <div key={category} className="space-y-3">
-                        <div className="flex items-center justify-between">
-                          <h3 className="text-lg font-semibold flex items-center gap-2">
-                            {category}
-                            <Badge variant="outline" className="border-cyber-green/30 text-cyber-green">
-                              {selectedInCategory.length}/{categoryModules.length}
-                            </Badge>
-                          </h3>
-                          <div className="flex gap-2">
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => selectAllInCategory(category)}
-                              className="text-xs border-cyber-green/30"
-                            >
-                              Select All
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => deselectAllInCategory(category)}
-                              className="text-xs border-cyber-green/30"
-                            >
-                              Deselect All
-                            </Button>
+              {/* Module Selection */}
+              <Card className="border-cyber-green/20 shadow-lg">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Settings className="h-5 w-5 text-cyber-green" />
+                    Module Selection
+                  </CardTitle>
+                  <CardDescription>
+                    Choose reconnaissance modules and configure options
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-6">
+                    {moduleCategories.map(category => {
+                      const categoryModules = reconModules.filter(m => m.category === category);
+                      const selectedInCategory = categoryModules.filter(m => selectedModules.includes(m.id));
+                      
+                      return (
+                        <div key={category} className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-lg font-semibold flex items-center gap-2">
+                              {category}
+                              <Badge variant="outline" className="border-cyber-green/30 text-cyber-green">
+                                {selectedInCategory.length}/{categoryModules.length}
+                              </Badge>
+                            </h3>
+                            <div className="flex gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => selectAllInCategory(category)}
+                                className="text-xs border-cyber-green/30"
+                              >
+                                Select All
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => deselectAllInCategory(category)}
+                                className="text-xs border-cyber-green/30"
+                              >
+                                Deselect All
+                              </Button>
+                            </div>
+                          </div>
+                          
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                            {categoryModules.map(module => {
+                              const Icon = module.icon;
+                              const isSelected = selectedModules.includes(module.id);
+                              
+                              return (
+                                <div
+                                  key={module.id}
+                                  className={`p-3 border rounded-lg transition-all cursor-pointer ${
+                                    isSelected 
+                                      ? 'border-cyber-green/50 bg-cyber-green/5' 
+                                      : 'border-border hover:border-cyber-green/30'
+                                  }`}
+                                  onClick={() => toggleModule(module.id)}
+                                >
+                                  <div className="flex items-start gap-3">
+                                    <Checkbox
+                                      checked={isSelected}
+                                      onChange={() => toggleModule(module.id)}
+                                      className="mt-1"
+                                    />
+                                    <div className="flex-1 min-w-0">
+                                      <div className="flex items-center gap-2 mb-1">
+                                        <Icon className="h-4 w-4 text-cyber-green flex-shrink-0" />
+                                        <span className="font-medium text-sm truncate">{module.name}</span>
+                                        {module.options && (
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-6 w-6 p-0"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setConfigModule(module);
+                                            }}
+                                          >
+                                            <Settings className="h-3 w-3" />
+                                          </Button>
+                                        )}
+                                      </div>
+                                      <p className="text-xs text-muted-foreground leading-tight">
+                                        {module.description}
+                                      </p>
+                                      <div className="flex items-center gap-2 mt-1">
+                                        <Badge variant="secondary" className="text-xs">
+                                          {module.executionTime || 30}s
+                                        </Badge>
+                                        {module.requires.length > 0 && (
+                                          <span className="text-xs text-muted-foreground">
+                                            Requires: {module.requires.join(', ')}
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
                           </div>
                         </div>
-                        
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                          {categoryModules.map(module => {
-                            const Icon = module.icon;
-                            const isSelected = selectedModules.includes(module.id);
-                            
-                            return (
-                              <div
-                                key={module.id}
-                                className={`p-3 border rounded-lg transition-all cursor-pointer ${
-                                  isSelected 
-                                    ? 'border-cyber-green/50 bg-cyber-green/5' 
-                                    : 'border-border hover:border-cyber-green/30'
-                                }`}
-                                onClick={() => toggleModule(module.id)}
-                              >
-                                <div className="flex items-start gap-3">
-                                  <Checkbox
-                                    checked={isSelected}
-                                    onChange={() => toggleModule(module.id)}
-                                    className="mt-1"
-                                  />
-                                  <div className="flex-1 min-w-0">
-                                    <div className="flex items-center gap-2 mb-1">
-                                      <Icon className="h-4 w-4 text-cyber-green flex-shrink-0" />
-                                      <span className="font-medium text-sm truncate">{module.name}</span>
-                                      {module.options && (
-                                        <Button
-                                          variant="ghost"
-                                          size="sm"
-                                          className="h-6 w-6 p-0"
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            setConfigModule(module);
-                                          }}
-                                        >
-                                          <Settings className="h-3 w-3" />
-                                        </Button>
-                                      )}
-                                    </div>
-                                    <p className="text-xs text-muted-foreground leading-tight">
-                                      {module.description}
-                                    </p>
-                                    <div className="flex items-center gap-2 mt-1">
-                                      <Badge variant="secondary" className="text-xs">
-                                        {module.executionTime || 30}s
-                                      </Badge>
-                                      {module.requires.length > 0 && (
-                                        <span className="text-xs text-muted-foreground">
-                                          Requires: {module.requires.join(', ')}
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div className="mt-6 flex items-center justify-between p-4 bg-secondary/30 rounded-lg">
-                  <div className="flex items-center gap-4">
-                    <span className="text-sm font-medium">
-                      Selected: {selectedModules.length} modules
-                    </span>
-                    <span className="text-sm text-muted-foreground">
-                      Est. time: {Math.ceil(DependencyResolver.estimateTotalTime(getSelectedModuleObjects()) / 60)} min
-                    </span>
+                      );
+                    })}
                   </div>
-                  <Button 
-                    onClick={validateAndStartScan}
-                    disabled={!target.trim() || selectedModules.length === 0}
-                    variant="cyber"
-                    className="min-w-32"
-                  >
-                    <Play className="h-4 w-4 mr-2" />
-                    Start Scan
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
 
-            {/* Dependency Visualization */}
-            {selectedModules.length > 0 && (
-              <DependencyVisualization modules={getSelectedModuleObjects()} />
-            )}
-          </TabsContent>
-
-          {/* Monitor Tab */}
-          <TabsContent value="monitor" className="space-y-6">
-            {currentScan ? (
-              <>
-                <Card className="border-cyber-green/20 shadow-lg">
-                  <CardHeader>
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <CardTitle className="flex items-center gap-2">
-                          <Play className="h-5 w-5 text-cyber-green" />
-                          {currentScan.name}
-                        </CardTitle>
-                        <CardDescription>
-                          Target: {currentScan.target} | Started: {currentScan.startedAt?.toLocaleTimeString()}
-                        </CardDescription>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {currentScan.status === 'running' && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={pauseScan}
-                            className="border-cyber-green/30"
-                          >
-                            <Pause className="h-4 w-4 mr-2" />
-                            Pause
-                          </Button>
-                        )}
-                      </div>
+                  <div className="mt-6 flex items-center justify-between p-4 bg-secondary/30 rounded-lg">
+                    <div className="flex items-center gap-4">
+                      <span className="text-sm font-medium">
+                        Selected: {selectedModules.length} modules
+                      </span>
+                      <span className="text-sm text-muted-foreground">
+                        Est. time: {Math.ceil(DependencyResolver.estimateTotalTime(getSelectedModuleObjects()) / 60)} min
+                      </span>
                     </div>
-                  </CardHeader>
-                  <CardContent>
-                    <ScanStatusIndicator scan={currentScan} />
-                  </CardContent>
-                </Card>
+                    <Button 
+                      onClick={validateAndStartScan}
+                      disabled={!target.trim() || selectedModules.length === 0}
+                      variant="cyber"
+                      className="min-w-32"
+                    >
+                      <Play className="h-4 w-4 mr-2" />
+                      Start Scan
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
 
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                  {/* Real-time Results */}
+              {/* Dependency Visualization */}
+              {selectedModules.length > 0 && (
+                <DependencyVisualization modules={getSelectedModuleObjects()} />
+              )}
+            </TabsContent>
+
+            {/* Monitor Tab */}
+            <TabsContent value="monitor" className="space-y-6">
+              {currentScan ? (
+                <>
                   <Card className="border-cyber-green/20 shadow-lg">
                     <CardHeader>
-                      <CardTitle className="flex items-center gap-2">
-                        <Zap className="h-4 w-4 text-cyber-blue" />
-                        Live Module Status
-                      </CardTitle>
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <CardTitle className="flex items-center gap-2">
+                            <Play className="h-5 w-5 text-cyber-green" />
+                            {currentScan.name}
+                          </CardTitle>
+                          <CardDescription>
+                            Target: {currentScan.target} | Started: {currentScan.startedAt?.toLocaleTimeString()}
+                          </CardDescription>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {currentScan.status === 'running' && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={pauseScan}
+                              className="border-cyber-green/30"
+                            >
+                              <Pause className="h-4 w-4 mr-2" />
+                              Pause
+                            </Button>
+                          )}
+                        </div>
+                      </div>
                     </CardHeader>
                     <CardContent>
-                      <div className="space-y-3 max-h-96 overflow-y-auto">
-                        {currentScan.results.map(result => {
-                          const module = reconModules.find(m => m.id === result.moduleId);
-                          const Icon = module?.icon || CheckCircle;
-                          
-                          const getStatusIcon = () => {
-                            switch (result.status) {
-                              case 'running':
-                                return <Zap className="h-4 w-4 text-cyber-blue animate-pulse" />;
-                              case 'completed':
-                                return <CheckCircle className="h-4 w-4 text-cyber-green" />;
-                              case 'error':
-                                return <AlertTriangle className="h-4 w-4 text-destructive" />;
-                              default:
-                                return <Clock className="h-4 w-4 text-muted-foreground" />;
-                            }
-                          };
-
-                          const getStatusColor = () => {
-                            switch (result.status) {
-                              case 'running':
-                                return 'bg-cyber-blue/20 text-cyber-blue border-cyber-blue/30';
-                              case 'completed':
-                                return 'bg-cyber-green/20 text-cyber-green border-cyber-green/30';
-                              case 'error':
-                                return 'bg-destructive/20 text-destructive border-destructive/30';
-                              default:
-                                return 'bg-muted text-muted-foreground';
-                            }
-                          };
-                          
-                          return (
-                            <div
-                              key={result.id}
-                              className="flex items-center gap-3 p-3 border border-border rounded-lg"
-                            >
-                              <Icon className="h-4 w-4 text-cyber-green flex-shrink-0" />
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2 mb-1">
-                                  <span className="font-medium text-sm truncate">{result.moduleName}</span>
-                                  <Badge variant="outline" className={`text-xs ${getStatusColor()}`}>
-                                    {result.status}
-                                  </Badge>
-                                </div>
-                                {result.status === 'running' && (
-                                  <div className="text-xs text-muted-foreground">
-                                    Executing reconnaissance tasks...
-                                  </div>
-                                )}
-                                {result.status === 'completed' && (
-                                  <div className="text-xs text-muted-foreground">
-                                    Completed in {result.endTime && result.startTime ? 
-                                      Math.round((result.endTime.getTime() - result.startTime.getTime()) / 1000) : 0}s
-                                  </div>
-                                )}
-                                {result.status === 'error' && result.error && (
-                                  <div className="text-xs text-destructive">
-                                    {result.error}
-                                  </div>
-                                )}
-                              </div>
-                              {getStatusIcon()}
-                            </div>
-                          );
-                        })}
-                      </div>
+                      <ScanStatusIndicator scan={currentScan} />
                     </CardContent>
                   </Card>
 
-                  {/* Activity Log */}
-                  <ScanLogViewer scan={currentScan} />
-                </div>
-              </>
-            ) : (
-              <Card className="border-cyber-green/20">
-                <CardContent className="text-center py-12">
-                  <Play className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                  <p className="text-muted-foreground">No active scan. Start a new scan to monitor progress here.</p>
-                </CardContent>
-              </Card>
-            )}
-          </TabsContent>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {/* Live Module Status */}
+                    <Card className="border-cyber-green/20 shadow-lg">
+                      <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                          <Zap className="h-4 w-4 text-cyber-blue" />
+                          Live Module Status
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="space-y-3 max-h-96 overflow-y-auto">
+                          {currentScan.results.map(result => {
+                            const module = reconModules.find(m => m.id === result.moduleId);
+                            const Icon = module?.icon || CheckCircle;
+                            
+                            const getStatusIcon = () => {
+                              switch (result.status) {
+                                case 'running':
+                                  return <Zap className="h-4 w-4 text-cyber-blue animate-pulse" />;
+                                case 'completed':
+                                  return <CheckCircle className="h-4 w-4 text-cyber-green" />;
+                                case 'error':
+                                  return <AlertTriangle className="h-4 w-4 text-destructive" />;
+                                default:
+                                  return <Clock className="h-4 w-4 text-muted-foreground" />;
+                              }
+                            };
 
-          {/* History Tab */}
-          <TabsContent value="history" className="space-y-6">
-            <Card className="border-cyber-green/20 shadow-lg">
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <CardTitle className="flex items-center gap-2">
-                      <History className="h-5 w-5 text-cyber-green" />
-                      Scan History
-                    </CardTitle>
-                    <CardDescription>
-                      View and manage previous reconnaissance scans
-                    </CardDescription>
-                  </div>
-                  <div className="text-sm text-muted-foreground">
-                    {scanHistory.length} total scans | Storage: {ScanStorage.getStorageSize()}
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent>
-                {scanHistory.length > 0 ? (
-                  <div className="space-y-3">
-                    {scanHistory
-                      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-                      .map(scan => (
-                        <div
-                          key={scan.id}
-                          className="flex items-center gap-4 p-4 border border-border rounded-lg hover:border-cyber-green/30 transition-all"
-                        >
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="font-medium">{scan.name}</span>
-                              <Badge 
-                                variant={scan.status === 'completed' ? 'default' : 'secondary'}
-                                className={scan.status === 'completed' ? 'bg-cyber-green/20 text-cyber-green border-cyber-green/30' : ''}
-                              >
-                                {scan.status}
-                              </Badge>
-                            </div>
-                            <div className="text-sm text-muted-foreground">
-                              Target: {scan.target} | Created: {new Date(scan.createdAt).toLocaleString()}
-                            </div>
-                            <div className="text-sm text-muted-foreground">
-                              Modules: {scan.selectedModules.length} | Progress: {Math.round(scan.progress)}%
-                            </div>
-                          </div>
-                          
-                          <div className="flex items-center gap-2">
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => setViewingScan(scan.id)}
-                              className="border-cyber-green/30"
-                            >
-                              <Eye className="h-4 w-4 mr-2" />
-                              View
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => ScanStorage.exportScan(scan.id)}
-                              className="border-cyber-green/30"
-                            >
-                              <Download className="h-4 w-4 mr-2" />
-                              Export
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => deleteScan(scan.id)}
-                              className="border-destructive/30 text-destructive hover:bg-destructive/10"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          </div>
-                        </div>
-                      ))}
-                  </div>
-                ) : (
-                  <div className="text-center py-12">
-                    <History className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-                    <p className="text-muted-foreground">No scans in history. Create your first scan to get started.</p>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          {/* Modules Tab */}
-          <TabsContent value="modules" className="space-y-6">
-            <Card className="border-cyber-green/20 shadow-lg">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Settings className="h-5 w-5 text-cyber-green" />
-                  Module Overview
-                </CardTitle>
-                <CardDescription>
-                  Detailed information about all available reconnaissance modules
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-6">
-                  {moduleCategories.map(category => {
-                    const categoryModules = reconModules.filter(m => m.category === category);
-                    
-                    return (
-                      <div key={category} className="space-y-3">
-                        <h3 className="text-lg font-semibold">{category}</h3>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          {categoryModules.map(module => {
-                            const Icon = module.icon;
+                            const getStatusColor = () => {
+                              switch (result.status) {
+                                case 'running':
+                                  return 'bg-cyber-blue/20 text-cyber-blue border-cyber-blue/30';
+                                case 'completed':
+                                  return 'bg-cyber-green/20 text-cyber-green border-cyber-green/30';
+                                case 'error':
+                                  return 'bg-destructive/20 text-destructive border-destructive/30';
+                                default:
+                                  return 'bg-muted text-muted-foreground';
+                              }
+                            };
                             
                             return (
                               <div
-                                key={module.id}
-                                className="p-4 border border-border rounded-lg hover:border-cyber-green/30 transition-all"
+                                key={result.id}
+                                className="flex items-center gap-3 p-3 border border-border rounded-lg"
                               >
-                                <div className="flex items-start gap-3">
-                                  <Icon className="h-5 w-5 text-cyber-green mt-1" />
-                                  <div className="flex-1">
-                                    <div className="flex items-center gap-2 mb-2">
-                                      <span className="font-medium">{module.name}</span>
-                                      <Badge variant="outline" className="border-cyber-green/30 text-cyber-green text-xs">
-                                        {module.executionTime || 30}s
-                                      </Badge>
-                                    </div>
-                                    <p className="text-sm text-muted-foreground mb-2">
-                                      {module.description}
-                                    </p>
-                                    <div className="space-y-1 text-xs">
-                                      <div>
-                                        <span className="text-muted-foreground">Requires:</span> {module.requires.join(', ') || 'None'}
-                                      </div>
-                                      <div>
-                                        <span className="text-muted-foreground">Produces:</span> {module.produces.join(', ')}
-                                      </div>
-                                    </div>
+                                <Icon className="h-4 w-4 text-cyber-green flex-shrink-0" />
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-2 mb-1">
+                                    <span className="font-medium text-sm truncate">{result.moduleName}</span>
+                                    <Badge variant="outline" className={`text-xs ${getStatusColor()}`}>
+                                      {result.status}
+                                    </Badge>
                                   </div>
+                                  {result.status === 'running' && (
+                                    <div className="text-xs text-muted-foreground">
+                                      Executing reconnaissance tasks...
+                                    </div>
+                                  )}
+                                  {result.status === 'completed' && (
+                                    <div className="text-xs text-muted-foreground">
+                                      Completed in {result.endTime && result.startTime ? 
+                                        Math.round((result.endTime.getTime() - result.startTime.getTime()) / 1000) : 0}s
+                                    </div>
+                                  )}
+                                  {result.status === 'error' && result.error && (
+                                    <div className="text-xs text-destructive">
+                                      {result.error}
+                                    </div>
+                                  )}
                                 </div>
+                                {getStatusIcon()}
                               </div>
                             );
                           })}
                         </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
-        </Tabs>
+                      </CardContent>
+                    </Card>
+
+                    {/* Activity Log */}
+                    <ScanLogViewer scan={currentScan} />
+                  </div>
+                </>
+              ) : (
+                <Card className="border-cyber-green/20">
+                  <CardContent className="text-center py-12">
+                    <Play className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+                    <p className="text-muted-foreground">No active scan. Start a new scan to monitor progress here.</p>
+                  </CardContent>
+                </Card>
+              )}
+            </TabsContent>
+
+            {/* History Tab */}
+            <TabsContent value="history" className="space-y-6">
+              <Card className="border-cyber-green/20 shadow-lg">
+                <CardHeader>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <CardTitle className="flex items-center gap-2">
+                        <History className="h-5 w-5 text-cyber-green" />
+                        Scan History
+                      </CardTitle>
+                      <CardDescription>
+                        View and manage previous reconnaissance scans
+                      </CardDescription>
+                    </div>
+                    <div className="text-sm text-muted-foreground">
+                      {scanHistory.length} total scans
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {scanHistory.length > 0 ? (
+                    <div className="space-y-3">
+                      {scanHistory
+                        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+                        .map(scan => (
+                          <div
+                            key={scan.id}
+                            className="flex items-center gap-4 p-4 border border-border rounded-lg hover:border-cyber-green/30 transition-all"
+                          >
+                            <div className="flex-1">
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className="font-medium">{scan.name}</span>
+                                <Badge 
+                                  variant={scan.status === 'completed' ? 'default' : 'secondary'}
+                                  className={scan.status === 'completed' ? 'bg-cyber-green/20 text-cyber-green border-cyber-green/30' : ''}
+                                >
+                                  {scan.status}
+                                </Badge>
+                              </div>
+                              <div className="text-sm text-muted-foreground">
+                                Target: {scan.target} | Created: {new Date(scan.createdAt).toLocaleString()}
+                              </div>
+                              <div className="text-sm text-muted-foreground">
+                                Modules: {scan.selectedModules.length} | Progress: {Math.round(scan.progress)}%
+                              </div>
+                            </div>
+                            
+                            <div className="flex items-center gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setViewingScan(scan.id)}
+                                className="border-cyber-green/30"
+                              >
+                                <Eye className="h-4 w-4 mr-2" />
+                                View
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => deleteScan(scan.id)}
+                                className="border-destructive/30 text-destructive hover:bg-destructive/10"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-12">
+                      <History className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+                      <p className="text-muted-foreground">No scans in history. Create your first scan to get started.</p>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            {/* Modules Tab */}
+            <TabsContent value="modules" className="space-y-6">
+              <Card className="border-cyber-green/20 shadow-lg">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Settings className="h-5 w-5 text-cyber-green" />
+                    Module Overview
+                  </CardTitle>
+                  <CardDescription>
+                    Detailed information about all available reconnaissance modules
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-6">
+                    {moduleCategories.map(category => {
+                      const categoryModules = reconModules.filter(m => m.category === category);
+                      
+                      return (
+                        <div key={category} className="space-y-3">
+                          <h3 className="text-lg font-semibold">{category}</h3>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {categoryModules.map(module => {
+                              const Icon = module.icon;
+                              
+                              return (
+                                <div
+                                  key={module.id}
+                                  className="p-4 border border-border rounded-lg hover:border-cyber-green/30 transition-all"
+                                >
+                                  <div className="flex items-start gap-3">
+                                    <Icon className="h-5 w-5 text-cyber-green mt-1" />
+                                    <div className="flex-1">
+                                      <div className="flex items-center gap-2 mb-2">
+                                        <span className="font-medium">{module.name}</span>
+                                        <Badge variant="outline" className="border-cyber-green/30 text-cyber-green text-xs">
+                                          {module.executionTime || 30}s
+                                        </Badge>
+                                      </div>
+                                      <p className="text-sm text-muted-foreground mb-2">
+                                        {module.description}
+                                      </p>
+                                      <div className="space-y-1 text-xs">
+                                        <div>
+                                          <span className="text-muted-foreground">Requires:</span> {module.requires.join(', ') || 'None'}
+                                        </div>
+                                        <div>
+                                          <span className="text-muted-foreground">Produces:</span> {module.produces.join(', ')}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </CardContent>
+              </Card>
+            </TabsContent>
+          </Tabs>
+        </div>
       </div>
 
       {/* Module Configuration Dialog */}
